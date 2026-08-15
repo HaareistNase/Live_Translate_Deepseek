@@ -1,0 +1,1 @@
+python soundcard_transcriber.py --list-devices

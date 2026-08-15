@@ -1,0 +1,1 @@
+python soundcard_transcriber.py --loopback --device 4 --translate
