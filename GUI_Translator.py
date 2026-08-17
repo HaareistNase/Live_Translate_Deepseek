@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-GPU Live-Transkription/Übersetzung mit GUI (tkinter) – Dark Mode.
-Nimmt Loopback-Audio auf und zeigt Text mit Zeitstempel in einem dunklen Fenster an.
+GPU Live-Transkription/Übersetzung mit GUI (tkinter) – Dark Mode komplett.
+Rahmenloses Fenster mit eigener, dunkler Titelleiste.
 """
 
 import queue
@@ -13,7 +13,7 @@ from datetime import timedelta
 
 import numpy as np
 import tkinter as tk
-from tkinter import scrolledtext, messagebox
+from tkinter import ttk, messagebox
 
 from faster_whisper import WhisperModel
 
@@ -34,7 +34,10 @@ HALLUCINATION_PHRASES = [
     "thank you for watching",
     "please like and subscribe",
     "comment below",
+    "Transcribed by https://otter.ai",
+    "Transcribe all words literally, including profanity and slang",
 ]
+
 
 class TranscriberApp:
     def __init__(self, root, args):
@@ -42,40 +45,107 @@ class TranscriberApp:
         self.args = args
 
         # Farben für Dark Mode
-        self.bg_color = "#1e1e1e"          # dunkler Hintergrund
-        self.fg_color = "#ffffff"          # weißer Text
-        self.accent_color = "#4da6ff"      # helles Blau für Zeitstempel
-        self.status_bg = "#2d2d2d"         # etwas hellerer Hintergrund für Statusleiste
-        self.button_bg = "#3c3c3c"         # Button-Hintergrund
-        self.button_fg = "#ffffff"         # Button-Text
-        self.text_bg = "#000000"           # reines Schwarz für Textbereich
+        self.bg_color = "#1e1e1e"
+        self.fg_color = "#ffffff"
+        self.accent_color = "#4da6ff"
+        self.status_bg = "#2d2d2d"
+        self.button_bg = "#3c3c3c"
+        self.button_fg = "#ffffff"
+        self.text_bg = "#000000"
+        self.title_bg = "#2b2b2b"
 
-        self.root.title("Live Transkription / Übersetzung")
-        self.root.geometry("900x600")
-        self.root.configure(bg=self.bg_color)
+        # Fenster rahmenlos machen (eigene Titelleiste)
+        self.root.overrideredirect(True)
+        self.root.geometry("900x600+100+100")  # x=100, y=100 Startposition
 
-        # Textbereich mit weichem Zeilenumbruch und dunklem Design
-        self.text_area = scrolledtext.ScrolledText(
-            root,
+        # Haupt-Container
+        main_frame = tk.Frame(root, bg=self.bg_color)
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        # ===== Eigene Titelleiste =====
+        title_bar = tk.Frame(main_frame, bg=self.title_bg, relief=tk.FLAT, bd=0)
+        title_bar.pack(fill=tk.X, side=tk.TOP)
+
+        # Titeltext
+        title_label = tk.Label(
+            title_bar, text="Live Transkription / Übersetzung",
+            bg=self.title_bg, fg=self.fg_color, font=("Segoe UI", 11, "bold"),
+            padx=10, pady=6
+        )
+        title_label.pack(side=tk.LEFT)
+
+        # Buttons (Minimieren, Schließen)
+        btn_frame = tk.Frame(title_bar, bg=self.title_bg)
+        btn_frame.pack(side=tk.RIGHT)
+
+        minimize_btn = tk.Button(
+            btn_frame, text="–", command=self.minimize,
+            bg=self.title_bg, fg=self.fg_color,
+            activebackground=self.accent_color, activeforeground=self.fg_color,
+            relief=tk.FLAT, bd=0, width=3, font=("Segoe UI", 10)
+        )
+        minimize_btn.pack(side=tk.LEFT, padx=(0, 5))
+
+        close_btn = tk.Button(
+            btn_frame, text="✕", command=self.close,
+            bg=self.title_bg, fg=self.fg_color,
+            activebackground="#e81123", activeforeground=self.fg_color,
+            relief=tk.FLAT, bd=0, width=3, font=("Segoe UI", 10)
+        )
+        close_btn.pack(side=tk.LEFT)
+
+        # Fenster per Drag & Drop verschieben (nur Titelleiste)
+        title_bar.bind("<Button-1>", self.start_move)
+        title_bar.bind("<B1-Motion>", self.on_move)
+        title_label.bind("<Button-1>", self.start_move)
+        title_label.bind("<B1-Motion>", self.on_move)
+
+        # ===== Textbereich mit Scrollbalken =====
+        text_frame = tk.Frame(main_frame, bg=self.bg_color)
+        text_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+
+        self.text_area = tk.Text(
+            text_frame,
             wrap=tk.WORD,
             font=("Segoe UI", 12),
             bg=self.text_bg,
             fg=self.fg_color,
-            insertbackground=self.fg_color,   # Cursorfarbe
+            insertbackground=self.fg_color,
             relief=tk.FLAT,
             borderwidth=0,
             highlightthickness=0
         )
-        self.text_area.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        self.scrollbar = ttk.Scrollbar(text_frame, orient="vertical", command=self.text_area.yview)
+        self.text_area.configure(yscrollcommand=self.scrollbar.set)
+
+        self.text_area.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # ttk-Style für Scrollbalken
+        style = ttk.Style(self.root)
+        style.theme_use("clam")
+        style.configure(
+            "Vertical.TScrollbar",
+            background=self.button_bg,
+            troughcolor=self.bg_color,
+            bordercolor=self.bg_color,
+            arrowcolor=self.fg_color,
+            lightcolor=self.button_bg,
+            darkcolor=self.button_bg
+        )
+        style.map(
+            "Vertical.TScrollbar",
+            background=[("active", self.accent_color), ("pressed", self.accent_color)]
+        )
 
         # Tags für Zeitstempel und Text
         self.text_area.tag_configure("timestamp", foreground=self.accent_color, font=("Segoe UI", 10, "bold"))
         self.text_area.tag_configure("text", foreground=self.fg_color, font=("Segoe UI", 12))
 
-        # Statusleiste
+        # ===== Statusleiste =====
         self.status_var = tk.StringVar(value="Bereit")
         status_label = tk.Label(
-            root,
+            main_frame,
             textvariable=self.status_var,
             bg=self.status_bg,
             fg=self.fg_color,
@@ -85,8 +155,8 @@ class TranscriberApp:
         )
         status_label.pack(fill=tk.X, side=tk.BOTTOM)
 
-        # Buttons
-        button_frame = tk.Frame(root, bg=self.bg_color)
+        # ===== Buttons (Start/Stop) =====
+        button_frame = tk.Frame(main_frame, bg=self.bg_color)
         button_frame.pack(fill=tk.X, padx=10, pady=5)
 
         self.start_button = tk.Button(
@@ -116,12 +186,36 @@ class TranscriberApp:
         )
         self.stop_button.pack(side=tk.LEFT, padx=5)
 
-        # Queue für Nachrichten vom Arbeits-Thread
+        # Queue für Nachrichten
         self.message_queue = queue.Queue()
         self.worker_thread = None
         self.running = False
 
+        # Drag & Drop Variablen
+        self._drag_offset_x = 0
+        self._drag_offset_y = 0
+
         self.root.after(100, self.process_queue)
+
+    def minimize(self):
+        """Minimiert das Fenster in die Taskleiste."""
+        self.root.iconify()
+
+    def close(self):
+        """Beendet die Anwendung."""
+        self.running = False
+        self.root.destroy()
+
+    def start_move(self, event):
+        """Merkt sich die aktuelle Mausposition relativ zum Fenster."""
+        self._drag_offset_x = event.x
+        self._drag_offset_y = event.y
+
+    def on_move(self, event):
+        """Bewegt das Fenster mit der Maus."""
+        x = self.root.winfo_pointerx() - self._drag_offset_x
+        y = self.root.winfo_pointery() - self._drag_offset_y
+        self.root.geometry(f"+{x}+{y}")
 
     def process_queue(self):
         try:
