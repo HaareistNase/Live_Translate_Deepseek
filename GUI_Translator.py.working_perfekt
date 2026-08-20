@@ -2,9 +2,10 @@
 """
 GPU Live-Transkription/Übersetzung mit GUI (tkinter) – Dark Mode für Inhalt,
 normale Windows-Titelleiste (für Alt+Tab und Taskleiste).
-Mit Geräteauswahl (Dropdown) und RMS-Anzeige.
+Mit Geräteauswahl, RMS/dB-Anzeige, Spracherkennung, einstellbaren Parametern,
+Always-on-Top (standardmäßig aktiv), Translate (standardmäßig aktiv),
+sowie Start/Stop/Pause/Clear.
 Nimmt Loopback-Audio auf und zeigt Text mit Zeitstempel an.
-Zusätzlich: Clear-Button zum Leeren des Textbereichs.
 """
 
 import queue
@@ -53,15 +54,12 @@ HALLUCINATION_PHRASES = [
 def set_dark_title_bar(root):
     """Versucht, die Titelleiste dunkel zu färben (Windows 10/11)."""
     try:
-        # Handle des tkinter-Fensters
         hwnd = root.winfo_id()
-        # Attribut 20 = Dark Mode (Windows 10 2004+ / Windows 11)
         DWMWA_USE_IMMERSIVE_DARK_MODE = 20
         value = ctypes.c_int(1)
         ctypes.windll.dwmapi.DwmSetWindowAttribute(
             hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, ctypes.byref(value), ctypes.sizeof(value)
         )
-        # Zusätzlich Attribut 19 für ältere Windows 10-Versionen
         try:
             DWMWA_USE_IMMERSIVE_DARK_MODE_LEGACY = 19
             ctypes.windll.dwmapi.DwmSetWindowAttribute(
@@ -69,10 +67,8 @@ def set_dark_title_bar(root):
             )
         except Exception:
             pass
-        # Fenster neu zeichnen
         root.update_idletasks()
     except Exception:
-        # Nicht kritisch – Titelleiste bleibt dann hell
         pass
 
 
@@ -91,31 +87,94 @@ class TranscriberApp:
         self.text_bg = "#000000"
 
         self.root.title("Live Transkription / Übersetzung")
-        self.root.geometry("900x650+100+100")
+        self.root.geometry("1100x800+100+100")
         self.root.configure(bg=self.bg_color)
 
-        # Titelleiste dunkel färben (falls möglich)
         set_dark_title_bar(self.root)
 
-        # ===== Geräteauswahl und RMS-Anzeige =====
-        control_frame = tk.Frame(root, bg=self.bg_color)
-        control_frame.pack(fill=tk.X, padx=10, pady=5)
+        # ===== Einstellungsbereich (oberste Zeile) =====
+        settings_frame = tk.Frame(root, bg=self.bg_color)
+        settings_frame.pack(fill=tk.X, padx=10, pady=5)
 
-        tk.Label(control_frame, text="Audio-Device:", bg=self.bg_color, fg=self.fg_color).pack(side=tk.LEFT)
+        # Modell-Auswahl
+        tk.Label(settings_frame, text="Modell:", bg=self.bg_color, fg=self.fg_color).pack(side=tk.LEFT)
+        self.model_var = tk.StringVar(value=args.model)
+        self.model_combo = ttk.Combobox(
+            settings_frame,
+            textvariable=self.model_var,
+            state="readonly",
+            width=12,
+            values=["tiny", "base", "small", "medium", "large-v3"]
+        )
+        self.model_combo.pack(side=tk.LEFT, padx=5)
+
+        # Chunk-Größe
+        tk.Label(settings_frame, text="Chunk (s):", bg=self.bg_color, fg=self.fg_color).pack(side=tk.LEFT, padx=(15, 5))
+        self.chunk_var = tk.StringVar(value=str(args.chunk_size))
+        self.chunk_combo = ttk.Combobox(
+            settings_frame,
+            textvariable=self.chunk_var,
+            state="readonly",
+            width=8,
+            values=["5", "10", "15", "20"]
+        )
+        self.chunk_combo.pack(side=tk.LEFT, padx=5)
+
+        # Übersetzen-Checkbox (standardmäßig aktiv)
+        self.translate_var = tk.BooleanVar(value=True)
+        self.translate_check = tk.Checkbutton(
+            settings_frame,
+            text="Translate",
+            variable=self.translate_var,
+            bg=self.bg_color,
+            fg=self.fg_color,
+            selectcolor=self.button_bg,
+            activebackground=self.bg_color,
+            activeforeground=self.fg_color,
+            font=("Segoe UI", 10)
+        )
+        self.translate_check.pack(side=tk.LEFT, padx=(15, 5))
+
+        # Stille-Schwelle
+        tk.Label(settings_frame, text="Stille-Schwelle:", bg=self.bg_color, fg=self.fg_color).pack(side=tk.LEFT, padx=(15, 5))
+        self.silence_var = tk.StringVar(value=str(args.silence_threshold))
+        self.silence_combo = ttk.Combobox(
+            settings_frame,
+            textvariable=self.silence_var,
+            state="readonly",
+            width=10,
+            values=["0.0001", "0.0005", "0.001", "0.002", "0.005", "0.01", "0.02"]
+        )
+        self.silence_combo.pack(side=tk.LEFT, padx=5)
+
+        # Audio-Device
+        tk.Label(settings_frame, text="Audio-Device:", bg=self.bg_color, fg=self.fg_color).pack(side=tk.LEFT, padx=(15, 5))
         self.device_var = tk.StringVar()
         self.device_combo = ttk.Combobox(
-            control_frame,
+            settings_frame,
             textvariable=self.device_var,
             state="readonly",
-            width=40
+            width=30
         )
         self.device_combo.pack(side=tk.LEFT, padx=5)
 
-        tk.Label(control_frame, text="RMS:", bg=self.bg_color, fg=self.fg_color).pack(side=tk.LEFT, padx=(20, 5))
-        self.rms_canvas = tk.Canvas(control_frame, width=200, height=20, bg=self.text_bg, highlightthickness=0)
-        self.rms_canvas.pack(side=tk.LEFT)
-        self.rms_value_label = tk.Label(control_frame, text="0.0000", bg=self.bg_color, fg=self.fg_color, width=8)
-        self.rms_value_label.pack(side=tk.LEFT, padx=5)
+        # Always-on-Top (standardmäßig aktiv)
+        self.always_on_top_var = tk.BooleanVar(value=True)
+        self.always_on_top_check = tk.Checkbutton(
+            settings_frame,
+            text="AOT",
+            variable=self.always_on_top_var,
+            command=self.toggle_always_on_top,
+            bg=self.bg_color,
+            fg=self.fg_color,
+            selectcolor=self.button_bg,
+            activebackground=self.bg_color,
+            activeforeground=self.fg_color,
+            font=("Segoe UI", 10)
+        )
+        self.always_on_top_check.pack(side=tk.LEFT, padx=(15, 5))
+        # Always-on-Top sofort anwenden
+        self.toggle_always_on_top()
 
         self.load_devices()
 
@@ -140,7 +199,6 @@ class TranscriberApp:
         self.text_area.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
-        # ttk-Style für Scrollbalken
         style = ttk.Style(self.root)
         style.theme_use("clam")
         style.configure(
@@ -173,7 +231,7 @@ class TranscriberApp:
         )
         status_label.pack(fill=tk.X, side=tk.BOTTOM)
 
-        # ===== Buttons (Start/Stop/Clear) =====
+        # ===== Buttons und Anzeigen (zweite Zeile) =====
         button_frame = tk.Frame(root, bg=self.bg_color)
         button_frame.pack(fill=tk.X, padx=10, pady=5)
 
@@ -189,6 +247,20 @@ class TranscriberApp:
             relief=tk.FLAT
         )
         self.start_button.pack(side=tk.LEFT, padx=5)
+
+        self.pause_button = tk.Button(
+            button_frame,
+            text="Pause",
+            command=self.toggle_pause,
+            state=tk.DISABLED,
+            width=10,
+            bg=self.button_bg,
+            fg=self.button_fg,
+            activebackground=self.accent_color,
+            activeforeground=self.button_fg,
+            relief=tk.FLAT
+        )
+        self.pause_button.pack(side=tk.LEFT, padx=5)
 
         self.stop_button = tk.Button(
             button_frame,
@@ -217,12 +289,36 @@ class TranscriberApp:
         )
         self.clear_button.pack(side=tk.LEFT, padx=5)
 
+        # Pegel-Anzeige (RMS-Balken + dB-Wert)
+        tk.Label(button_frame, text="Pegel:", bg=self.bg_color, fg=self.fg_color).pack(side=tk.LEFT, padx=(20, 5))
+        self.rms_canvas = tk.Canvas(button_frame, width=150, height=20, bg=self.text_bg, highlightthickness=0)
+        self.rms_canvas.pack(side=tk.LEFT)
+        self.rms_value_label = tk.Label(button_frame, text="-60.0 dB", bg=self.bg_color, fg=self.fg_color, width=10)
+        self.rms_value_label.pack(side=tk.LEFT, padx=5)
+
+        # Sprachanzeige
+        tk.Label(button_frame, text="Sprache:", bg=self.bg_color, fg=self.fg_color).pack(side=tk.LEFT, padx=(20, 5))
+        self.language_label = tk.Label(
+            button_frame,
+            text="--",
+            bg=self.bg_color,
+            fg=self.accent_color,
+            font=("Segoe UI", 10, "bold"),
+            width=10
+        )
+        self.language_label.pack(side=tk.LEFT, padx=5)
+
         # Queue
         self.message_queue = queue.Queue()
         self.worker_thread = None
         self.running = False
+        self.paused = False
 
         self.root.after(100, self.process_queue)
+
+    def toggle_always_on_top(self):
+        """Setzt oder entfernt Always-on-Top."""
+        self.root.attributes('-topmost', self.always_on_top_var.get())
 
     def load_devices(self):
         """Lädt verfügbare Lautsprecher und füllt das Dropdown."""
@@ -259,6 +355,8 @@ class TranscriberApp:
                     self.text_area.see(tk.END)
                 elif msg_type == "rms":
                     self.update_rms_display(content)
+                elif msg_type == "language":
+                    self.language_label.config(text=content)
                 elif msg_type == "status":
                     self.status_var.set(content)
                 elif msg_type == "error":
@@ -269,24 +367,25 @@ class TranscriberApp:
         self.root.after(100, self.process_queue)
 
     def update_rms_display(self, rms):
-        self.rms_value_label.config(text=f"{rms:.4f}")
+        """Zeigt den Pegel in dB an und skaliert den Balken entsprechend."""
+        if rms <= 0:
+            db = -60.0
+        else:
+            import math
+            db = 20 * math.log10(rms)
+            db = max(-60.0, min(db, 0.0))
 
-        min_rms = 0.0001
-        max_rms = 0.1
-        rms_clamped = max(rms, min_rms)
+        self.rms_value_label.config(text=f"{db:.1f} dB")
 
-        import math
-        log_min = math.log10(min_rms)
-        log_max = math.log10(max_rms)
-        log_rms = math.log10(rms_clamped)
-
-        ratio = (log_rms - log_min) / (log_max - log_min)
+        min_db = -60.0
+        max_db = 0.0
+        ratio = (db - min_db) / (max_db - min_db)
         ratio = max(0.0, min(ratio, 1.0))
 
-        bar_width = int(200 * ratio)
+        bar_width = int(150 * ratio)
 
         self.rms_canvas.delete("all")
-        self.rms_canvas.create_rectangle(0, 0, 200, 20, fill=self.text_bg, outline="")
+        self.rms_canvas.create_rectangle(0, 0, 150, 20, fill=self.text_bg, outline="")
 
         if rms < self.args.silence_threshold:
             color = "#888888"
@@ -299,10 +398,19 @@ class TranscriberApp:
     def start(self):
         if self.running:
             return
+
         self.selected_device = self.device_var.get()
+        self.args.model = self.model_var.get()
+        self.args.chunk_size = int(self.chunk_var.get())
+        self.args.translate = self.translate_var.get()
+        self.args.silence_threshold = float(self.silence_var.get())
+
         self.running = True
+        self.paused = False
         self.start_button.config(state=tk.DISABLED)
+        self.pause_button.config(state=tk.NORMAL)
         self.stop_button.config(state=tk.NORMAL)
+        self.set_settings_enabled(False)
         self.status_var.set("Starte...")
 
         self.worker_thread = threading.Thread(target=self.transcribe_loop, daemon=True)
@@ -310,12 +418,43 @@ class TranscriberApp:
 
     def stop(self):
         self.running = False
+        self.paused = False
         self.start_button.config(state=tk.NORMAL)
+        self.pause_button.config(state=tk.DISABLED, text="Pause")
         self.stop_button.config(state=tk.DISABLED)
+        self.set_settings_enabled(True)
         self.status_var.set("Gestoppt")
 
+    def toggle_pause(self):
+        if not self.running:
+            return
+        self.paused = not self.paused
+        if self.paused:
+            self.pause_button.config(text="Resume")
+            self.status_var.set("Pausiert")
+        else:
+            self.pause_button.config(text="Pause")
+            self.status_var.set("Läuft...")
+
+    def set_settings_enabled(self, enabled):
+        """Aktiviert/deaktiviert die Einstellungselemente, außer Always-on-Top."""
+        widgets = [
+            self.model_combo, self.chunk_combo, self.silence_combo,
+            self.translate_check, self.device_combo
+        ]
+        for widget in widgets:
+            if isinstance(widget, ttk.Combobox):
+                if enabled:
+                    widget.config(state="readonly")
+                else:
+                    widget.config(state=tk.DISABLED)
+            elif isinstance(widget, tk.Checkbutton):
+                widget.config(state=tk.NORMAL if enabled else tk.DISABLED)
+
+        # Always-on-Top-Checkbox bleibt immer bedienbar
+        self.always_on_top_check.config(state=tk.NORMAL)
+
     def clear_text(self):
-        """Löscht den gesamten Inhalt des Textbereichs."""
         self.text_area.delete("1.0", tk.END)
 
     def transcribe_loop(self):
@@ -348,18 +487,37 @@ class TranscriberApp:
             with sc.get_microphone(id=str(speaker.name), include_loopback=True).recorder(
                     samplerate=self.args.sample_rate, channels=1) as mic:
                 while self.running:
-                    audio = mic.record(numframes=block_size)
-                    if audio.ndim > 1:
-                        audio = audio.flatten()
+                    while self.paused and self.running:
+                        time.sleep(0.1)
+                    if not self.running:
+                        break
 
-                    rms = np.sqrt(np.mean(audio**2))
-                    self.message_queue.put(("rms", rms))
+                    # Audio in kleinen Blöcken aufnehmen, um RMS schnell zu aktualisieren
+                    audio_buffer = np.empty(0, dtype=np.float32)
+                    while len(audio_buffer) < block_size and self.running and not self.paused:
+                        small_block = int(self.args.sample_rate * 0.1)
+                        remaining = block_size - len(audio_buffer)
+                        if small_block > remaining:
+                            small_block = remaining
 
-                    if rms < self.args.silence_threshold:
+                        audio_small = mic.record(numframes=small_block)
+                        if audio_small.ndim > 1:
+                            audio_small = audio_small.flatten()
+
+                        audio_buffer = np.concatenate((audio_buffer, audio_small))
+
+                        rms = np.sqrt(np.mean(audio_small**2))
+                        self.message_queue.put(("rms", rms))
+
+                    if not self.running or self.paused:
+                        continue
+
+                    rms_total = np.sqrt(np.mean(audio_buffer**2))
+                    if rms_total < self.args.silence_threshold:
                         continue
 
                     segments, info = model.transcribe(
-                        audio,
+                        audio_buffer,
                         language=self.args.language,
                         task="translate" if self.args.translate else "transcribe",
                         beam_size=5,
@@ -370,6 +528,9 @@ class TranscriberApp:
                         repetition_penalty=1.2,
                         no_repeat_ngram_size=3,
                     )
+
+                    if info.language:
+                        self.message_queue.put(("language", info.language))
 
                     text = " ".join([seg.text for seg in segments]).strip()
                     if text and not self.is_hallucination(text):
@@ -382,7 +543,9 @@ class TranscriberApp:
             self.running = False
             self.message_queue.put(("status", "Beendet"))
             self.root.after(0, lambda: self.start_button.config(state=tk.NORMAL))
+            self.root.after(0, lambda: self.pause_button.config(state=tk.DISABLED, text="Pause"))
             self.root.after(0, lambda: self.stop_button.config(state=tk.DISABLED))
+            self.root.after(0, lambda: self.set_settings_enabled(True))
 
     @staticmethod
     def is_hallucination(text):
