@@ -2,7 +2,7 @@
 """
 GPU Live-Transkription/Übersetzung mit GUI (tkinter) – Dark Mode für Inhalt,
 normale Windows-Titelleiste (für Alt+Tab und Taskleiste).
-Mit Geräteauswahl (Dropdown) und RMS-Anzeige.
+Mit Geräteauswahl (Dropdown), RMS-Anzeige (schnell) und Spracherkennung.
 Nimmt Loopback-Audio auf und zeigt Text mit Zeitstempel an.
 """
 
@@ -52,15 +52,12 @@ HALLUCINATION_PHRASES = [
 def set_dark_title_bar(root):
     """Versucht, die Titelleiste dunkel zu färben (Windows 10/11)."""
     try:
-        # Handle des tkinter-Fensters
         hwnd = root.winfo_id()
-        # Attribut 20 = Dark Mode (Windows 10 2004+ / Windows 11)
         DWMWA_USE_IMMERSIVE_DARK_MODE = 20
         value = ctypes.c_int(1)
         ctypes.windll.dwmapi.DwmSetWindowAttribute(
             hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, ctypes.byref(value), ctypes.sizeof(value)
         )
-        # Zusätzlich Attribut 19 für ältere Windows 10-Versionen
         try:
             DWMWA_USE_IMMERSIVE_DARK_MODE_LEGACY = 19
             ctypes.windll.dwmapi.DwmSetWindowAttribute(
@@ -68,10 +65,8 @@ def set_dark_title_bar(root):
             )
         except Exception:
             pass
-        # Fenster neu zeichnen
         root.update_idletasks()
     except Exception:
-        # Nicht kritisch – Titelleiste bleibt dann hell
         pass
 
 
@@ -93,7 +88,6 @@ class TranscriberApp:
         self.root.geometry("900x650+100+100")
         self.root.configure(bg=self.bg_color)
 
-        # Titelleiste dunkel färben (falls möglich)
         set_dark_title_bar(self.root)
 
         # ===== Geräteauswahl und RMS-Anzeige =====
@@ -115,6 +109,18 @@ class TranscriberApp:
         self.rms_canvas.pack(side=tk.LEFT)
         self.rms_value_label = tk.Label(control_frame, text="0.0000", bg=self.bg_color, fg=self.fg_color, width=8)
         self.rms_value_label.pack(side=tk.LEFT, padx=5)
+
+        # Spracherkennungsanzeige
+        tk.Label(control_frame, text="Sprache:", bg=self.bg_color, fg=self.fg_color).pack(side=tk.LEFT, padx=(20, 5))
+        self.language_label = tk.Label(
+            control_frame,
+            text="--",
+            bg=self.bg_color,
+            fg=self.accent_color,
+            font=("Segoe UI", 10, "bold"),
+            width=10
+        )
+        self.language_label.pack(side=tk.LEFT, padx=5)
 
         self.load_devices()
 
@@ -172,7 +178,7 @@ class TranscriberApp:
         )
         status_label.pack(fill=tk.X, side=tk.BOTTOM)
 
-        # ===== Buttons (Start/Stop) =====
+        # ===== Buttons (Start/Stop/Clear) =====
         button_frame = tk.Frame(root, bg=self.bg_color)
         button_frame.pack(fill=tk.X, padx=10, pady=5)
 
@@ -202,6 +208,19 @@ class TranscriberApp:
             relief=tk.FLAT
         )
         self.stop_button.pack(side=tk.LEFT, padx=5)
+
+        self.clear_button = tk.Button(
+            button_frame,
+            text="Clear",
+            command=self.clear_text,
+            width=10,
+            bg=self.button_bg,
+            fg=self.button_fg,
+            activebackground=self.accent_color,
+            activeforeground=self.button_fg,
+            relief=tk.FLAT
+        )
+        self.clear_button.pack(side=tk.LEFT, padx=5)
 
         # Queue
         self.message_queue = queue.Queue()
@@ -245,6 +264,8 @@ class TranscriberApp:
                     self.text_area.see(tk.END)
                 elif msg_type == "rms":
                     self.update_rms_display(content)
+                elif msg_type == "language":
+                    self.language_label.config(text=content)
                 elif msg_type == "status":
                     self.status_var.set(content)
                 elif msg_type == "error":
@@ -300,6 +321,10 @@ class TranscriberApp:
         self.stop_button.config(state=tk.DISABLED)
         self.status_var.set("Gestoppt")
 
+    def clear_text(self):
+        """Löscht den gesamten Inhalt des Textbereichs."""
+        self.text_area.delete("1.0", tk.END)
+
     def transcribe_loop(self):
         try:
             self.message_queue.put(("status", f"Lade Modell '{self.args.model}'..."))
@@ -330,18 +355,36 @@ class TranscriberApp:
             with sc.get_microphone(id=str(speaker.name), include_loopback=True).recorder(
                     samplerate=self.args.sample_rate, channels=1) as mic:
                 while self.running:
-                    audio = mic.record(numframes=block_size)
-                    if audio.ndim > 1:
-                        audio = audio.flatten()
+                    # Audio in kleinen Blöcken aufnehmen, um RMS schneller zu aktualisieren
+                    audio_buffer = np.empty(0, dtype=np.float32)
+                    while len(audio_buffer) < block_size and self.running:
+                        # Kleiner Block: 0,1 Sekunden
+                        small_block = int(self.args.sample_rate * 0.1)
+                        remaining = block_size - len(audio_buffer)
+                        if small_block > remaining:
+                            small_block = remaining
 
-                    rms = np.sqrt(np.mean(audio**2))
-                    self.message_queue.put(("rms", rms))
+                        audio_small = mic.record(numframes=small_block)
+                        if audio_small.ndim > 1:
+                            audio_small = audio_small.flatten()
 
-                    if rms < self.args.silence_threshold:
+                        audio_buffer = np.concatenate((audio_buffer, audio_small))
+
+                        # RMS des kleinen Blocks berechnen und sofort an GUI senden
+                        rms = np.sqrt(np.mean(audio_small**2))
+                        self.message_queue.put(("rms", rms))
+
+                    # Falls stop gedrückt wurde, abbrechen
+                    if not self.running:
+                        break
+
+                    # Gesamten Chunk auf Stille prüfen
+                    rms_total = np.sqrt(np.mean(audio_buffer**2))
+                    if rms_total < self.args.silence_threshold:
                         continue
 
                     segments, info = model.transcribe(
-                        audio,
+                        audio_buffer,
                         language=self.args.language,
                         task="translate" if self.args.translate else "transcribe",
                         beam_size=5,
@@ -352,6 +395,10 @@ class TranscriberApp:
                         repetition_penalty=1.2,
                         no_repeat_ngram_size=3,
                     )
+
+                    # Erkannte Sprache an GUI senden
+                    if info.language:
+                        self.message_queue.put(("language", info.language))
 
                     text = " ".join([seg.text for seg in segments]).strip()
                     if text and not self.is_hallucination(text):
